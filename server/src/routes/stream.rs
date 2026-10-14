@@ -305,6 +305,16 @@ fn ensure_download_disk_ready(
     requested_len: u64,
     is_partial: bool,
 ) -> Result<(), String> {
+    let existing_len = root
+        .join(file_name)
+        .metadata()
+        .map(|metadata| metadata.len().min(file_size))
+        .unwrap_or(0);
+    let required = required_download_space(file_size, existing_len, requested_len, is_partial);
+    if required == 0 {
+        return Ok(());
+    }
+
     std::fs::create_dir_all(root).map_err(|e| {
         format!(
             "download cache path is not writable: {} ({})",
@@ -322,19 +332,6 @@ fn ensure_download_disk_ready(
         )
     })?;
     let _ = std::fs::remove_file(&probe_path);
-
-    let existing_len = root
-        .join(file_name)
-        .metadata()
-        .map(|metadata| metadata.len().min(file_size))
-        .unwrap_or(0);
-    let remaining = file_size.saturating_sub(existing_len);
-    let safety_margin = 512 * 1024 * 1024u64;
-    let required = if is_partial {
-        requested_len.min(safety_margin)
-    } else {
-        remaining.saturating_add(safety_margin)
-    };
 
     let available = available_space_for_path(root).ok_or_else(|| {
         format!(
@@ -357,6 +354,25 @@ fn ensure_download_disk_ready(
 
 fn disk_space_check_treats_as_partial(is_download: bool, is_partial: bool) -> bool {
     !is_download || is_partial
+}
+
+fn required_download_space(
+    file_size: u64,
+    existing_len: u64,
+    requested_len: u64,
+    is_partial: bool,
+) -> u64 {
+    let remaining = file_size.saturating_sub(existing_len.min(file_size));
+    if remaining == 0 {
+        return 0;
+    }
+
+    let safety_margin = 512 * 1024 * 1024u64;
+    if is_partial {
+        requested_len.min(safety_margin)
+    } else {
+        remaining.saturating_add(safety_margin)
+    }
 }
 
 pub async fn head_stream_video(
@@ -1010,6 +1026,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         ensure_download_disk_ready(temp.path(), "movie.mkv", 10 * 1024 * 1024, 1, true)
             .expect("writable temp dir should pass partial request safety check");
+    }
+
+    #[test]
+    fn fully_downloaded_file_requires_no_extra_disk_space() {
+        assert_eq!(
+            required_download_space(10_000, 10_000, 10_000, false),
+            0
+        );
     }
 
     #[test]
